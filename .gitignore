@@ -1,0 +1,68 @@
+# ============================================================
+# SECRETS — never commit these (this repo is public!)
+# ============================================================
+
+# Environment variables (API keys, DB passwords).
+# We commit a safe template called .env.example instead.
+.env
+.env.*
+!.env.example
+
+# Google OAuth files. credentials.json identifies our app to Google;
+# token.json is a live login to your Gmail. Leaking either is bad.
+credentials.json
+token.json
+client_secret*.json
+
+# Any private keys / certificates
+*.pem
+*.key
+
+# ============================================================
+# GO build output
+# ============================================================
+
+# Compiled binaries (we build into ./bin)
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage reports
+*.test
+*.out
+coverage.html
+
+# Go workspace file (personal, machine-specific)
+go.work
+go.work.sum
+
+# ============================================================
+# Local data
+# ============================================================
+
+# Local database files / Docker volumes, if we ever store them in the repo folder
+/data/
+*.db
+*.sqlite
+
+# Your resume (used for RAG later) — personal, keep it out of a public repo
+/private/
+
+# ============================================================
+# AWS / Terraform (for the deploy step later)
+# ============================================================
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.aws-sam/
+
+# ============================================================
+# Editor & OS junk
+# ============================================================
+.DS_Store
+.vscode/
+.idea/
+*.swp
