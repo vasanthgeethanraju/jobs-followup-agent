@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/joho/godotenv v1.5.1
 	golang.org/x/oauth2 v0.37.0
 	google.golang.org/api v0.309.0
 )
