@@ -23,11 +23,10 @@ const (
 )
 
 func main() {
-	// Command-line flags, e.g.:  go run ./cmd/agent -min-days 7
-	minDays := flag.Int("min-days", 5, "follow up once an application is at least this many days old")
-	maxDays := flag.Int("max-days", 30, "ignore applications older than this many days")
+	// Command-line flags, e.g.:  go run ./cmd/agent -days 5
+	days := flag.Int("days", 7, "follow up on applications sent exactly this many days ago")
 	flag.Parse()
-	// flag.Int returns a *pointer* (*int); "*minDays" reads the value it points to.
+	// flag.Int returns a *pointer* (*int); "*days" reads the value it points to.
 
 	// A context carries deadlines/cancellation through every API call.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -45,17 +44,26 @@ func main() {
 		log.Fatal(err)
 	}
 	stopLabels := []string{labels[rejectedLabel], labels[nextStepsLabel]}
-	opts := followup.Options{MinDays: *minDays, MaxDays: *maxDays, StopLabelIDs: stopLabels}
+	// Min = Max = days: the rules double-check the same window the search uses.
+	opts := followup.Options{MinDays: *days, MaxDays: *days, StopLabelIDs: stopLabels}
 
-	// 3. Only conversations where YOU sent a !Jobs email in the time window.
-	//    "after:" keeps Gmail from returning old ones at all (fewer API calls).
+	// 3. Only conversations where YOU sent a !Jobs email on that exact day.
+	//    We give Gmail precise Unix timestamps (seconds since 1970) for
+	//    YOUR local midnight → next midnight. Plain dates like "after:2026/10/20"
+	//    would be read in Pacific time, which is wrong if you're elsewhere.
 	now := time.Now()
-	since := now.AddDate(0, 0, -(*maxDays + 1)).Format("2006/01/02") // Go's date format is "by example"
-	threadIDs, err := mailbox.ListThreadIDs(ctx, svc, labels[jobsLabel], "in:sent after:"+since)
+	y, m, d := now.AddDate(0, 0, -*days).Date()
+	dayStart := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
+	dayEnd := dayStart.AddDate(0, 0, 1)
+	query := fmt.Sprintf("in:sent after:%d before:%d", dayStart.Unix(), dayEnd.Unix())
+
+	threadIDs, err := mailbox.ListThreadIDs(ctx, svc, labels[jobsLabel], query)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Checking %d applications you sent in the last %d days...\n\n", len(threadIDs), *maxDays)
+	// Go formats dates "by example": you write how Jan 2, 2006 should look.
+	fmt.Printf("Checking %d applications you sent on %s (%d days ago)...\n\n",
+		len(threadIDs), dayStart.Format("Mon Jan 2"), *days)
 
 	// 4. Decide for each conversation.
 	var toFollowUp, skipped []followup.Decision
