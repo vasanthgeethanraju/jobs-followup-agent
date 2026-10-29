@@ -1,0 +1,25 @@
+# Local development services. Start with:  docker compose up -d
+# Stop with:  docker compose down   (your data survives — it lives in a volume)
+services:
+  db:
+    # Official Postgres + the pgvector extension pre-installed (needed for RAG in step 6).
+    image: pgvector/pgvector:pg17
+    environment:
+      # Local-only dev credentials. The real (cloud) database will use secrets.
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: jobs
+    ports:
+      # "host:container" — 5432 is already used by another project on this Mac,
+      # so we expose Postgres on 5433 instead.
+      - "5433:5432"
+    volumes:
+      # Named volume = data persists across container restarts/rebuilds.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d jobs"]
+      interval: 2s
+      retries: 15
+
+volumes:
+  pgdata:

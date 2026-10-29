@@ -13,6 +13,7 @@ import (
 	// Our own packages. Import path = module name (from go.mod) + folder.
 	"github.com/vasanthgeethanraju/jobs-followup-agent/internal/followup"
 	"github.com/vasanthgeethanraju/jobs-followup-agent/internal/mailbox"
+	"github.com/vasanthgeethanraju/jobs-followup-agent/internal/store"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -20,6 +21,13 @@ const (
 	jobsLabel      = "!Jobs"
 	rejectedLabel  = "!Jobs/Rejected"
 	nextStepsLabel = "!Jobs/Next Steps"
+
+	// If the agent hasn't run for ages, don't try to catch up further than this.
+	maxCatchUpDays = 14
+
+	// Default database for local dev (matches compose.yaml).
+	// Override with the DATABASE_URL environment variable.
+	defaultDatabaseURL = "postgres://agent:agent@localhost:5433/jobs?sslmode=disable"
 )
 
 func main() {
@@ -31,41 +39,53 @@ func main() {
 	// A context carries deadlines/cancellation through every API call.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	startedAt := time.Now()
 
-	// 1. Log in to Gmail (opens the browser the first time, then uses token.json).
+	// 1. Connect to Postgres (our memory).
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = defaultDatabaseURL
+	}
+	db, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	// 2. Log in to Gmail (opens the browser the first time, then uses token.json).
 	svc, err := mailbox.NewService(ctx, "credentials.json", "token.json")
 	if err != nil {
 		log.Fatalf("gmail login: %v", err)
 	}
 
-	// 2. Look up our labels' internal IDs.
+	// 3. Look up our labels' internal IDs.
 	labels, err := mailbox.FindLabelIDs(ctx, svc, jobsLabel, rejectedLabel, nextStepsLabel)
 	if err != nil {
 		log.Fatal(err)
 	}
 	stopLabels := []string{labels[rejectedLabel], labels[nextStepsLabel]}
-	// Min = Max = days: the rules double-check the same window the search uses.
-	opts := followup.Options{MinDays: *days, MaxDays: *days, StopLabelIDs: stopLabels}
 
-	// 3. Only conversations where YOU sent a !Jobs email on that exact day.
-	//    We give Gmail precise Unix timestamps (seconds since 1970) for
-	//    YOUR local midnight → next midnight. Plain dates like "after:2026/10/20"
-	//    would be read in Pacific time, which is wrong if you're elsewhere.
-	now := time.Now()
-	y, m, d := now.AddDate(0, 0, -*days).Date()
-	dayStart := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
-	dayEnd := dayStart.AddDate(0, 0, 1)
-	query := fmt.Sprintf("in:sent after:%d before:%d", dayStart.Unix(), dayEnd.Unix())
-
+	// 4. Work out WHICH days to check, using the last run from the database.
+	//    Ran yesterday  → check the one day that became due today.
+	//    Missed 2 days  → check 3 days (catch up).
+	//    Already ran today → re-check today's day (safe: saving is an upsert).
+	from, to, err := searchWindow(ctx, db, startedAt, *days)
+	if err != nil {
+		log.Fatal(err)
+	}
+	query := fmt.Sprintf("in:sent after:%d before:%d", from.Unix(), to.Unix())
 	threadIDs, err := mailbox.ListThreadIDs(ctx, svc, labels[jobsLabel], query)
 	if err != nil {
 		log.Fatal(err)
 	}
 	// Go formats dates "by example": you write how Jan 2, 2006 should look.
-	fmt.Printf("Checking %d applications you sent on %s (%d days ago)...\n\n",
-		len(threadIDs), dayStart.Format("Mon Jan 2"), *days)
+	fmt.Printf("Checking %d applications sent %s → %s...\n\n",
+		len(threadIDs), from.Format("Mon Jan 2"), to.AddDate(0, 0, -1).Format("Mon Jan 2"))
 
-	// 4. Decide for each conversation.
+	catchUp := int(to.Sub(from).Hours()/24) - 1 // extra days beyond the normal one
+	opts := followup.Options{MinDays: *days, MaxDays: *days + catchUp, StopLabelIDs: stopLabels}
+
+	// 5. Decide for each conversation, and SAVE the result.
 	var toFollowUp, skipped []followup.Decision
 	for _, id := range threadIDs {
 		thread, err := mailbox.GetThread(ctx, svc, id)
@@ -78,16 +98,73 @@ func main() {
 			log.Fatal(err)
 		}
 
-		d := followup.Decide(thread, opts, now, closed)
+		d := followup.Decide(thread, opts, startedAt, closed)
+		if d.To == "" {
+			continue // not an email you sent; nothing to track
+		}
+
+		status := "skipped"
 		if d.FollowUp {
+			status = "follow_up_due"
 			toFollowUp = append(toFollowUp, d)
 		} else {
 			skipped = append(skipped, d)
 		}
+
+		err = db.SaveApplication(ctx, store.Application{
+			ThreadID:   d.ThreadID,
+			CompanyKey: followup.CompanyKey(d.To),
+			To:         d.To,
+			Subject:    d.Subject,
+			AppliedAt:  d.AppliedAt,
+			Status:     status,
+			Reason:     d.Reason,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	// 6. Remember this run, so tomorrow knows where to pick up.
+	if err := db.RecordRun(ctx, startedAt, len(threadIDs), len(toFollowUp)); err != nil {
+		log.Fatal(err)
 	}
 
 	printTable(fmt.Sprintf("FOLLOW UP (%d)", len(toFollowUp)), toFollowUp)
 	printTable(fmt.Sprintf("SKIPPED (%d)", len(skipped)), skipped)
+}
+
+// searchWindow returns [from, to): local midnights bounding the days whose
+// applications became due since the last run.
+func searchWindow(ctx context.Context, db *store.Store, now time.Time, days int) (from, to time.Time, err error) {
+	today := midnight(now)
+
+	lastRunDay := today.AddDate(0, 0, -1) // first run ever: act as if we ran yesterday
+	last, ok, err := db.LastRun(ctx)
+	if err != nil {
+		return from, to, err
+	}
+	if ok {
+		lastRunDay = midnight(last)
+	}
+	if oldest := today.AddDate(0, 0, -maxCatchUpDays); lastRunDay.Before(oldest) {
+		lastRunDay = oldest
+	}
+
+	// A run on day R handles applications sent on day R - days.
+	// So runs (lastRunDay, today] cover sends (lastRunDay+1-days, today-days].
+	from = lastRunDay.AddDate(0, 0, 1-days)
+	to = today.AddDate(0, 0, 1-days)
+	if !from.Before(to) { // already ran today → just re-check today's day
+		from = today.AddDate(0, 0, -days)
+	}
+	return from, to, nil
+}
+
+// midnight returns 00:00 local time on the same calendar day.
+func midnight(t time.Time) time.Time {
+	y, m, d := t.Local().Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.Local)
 }
 
 // companyClosed asks Gmail: does this company have a Rejected or Next Steps

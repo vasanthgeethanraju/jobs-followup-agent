@@ -22,6 +22,7 @@ type Options struct {
 
 // Decision is the verdict for one conversation.
 type Decision struct {
+	ThreadID  string // Gmail conversation ID (our database key)
 	FollowUp  bool
 	Reason    string    // why we did / didn't pick it
 	To        string    // who we'd follow up with
@@ -45,6 +46,7 @@ func Decide(t mailbox.Thread, opts Options, now time.Time, companyClosed bool) D
 
 	first := mine[0]
 	d := Decision{
+		ThreadID:  t.ID,
 		To:        first.To,
 		Subject:   first.Subject,
 		AppliedAt: first.Date,
