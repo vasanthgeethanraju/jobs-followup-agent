@@ -1,6 +1,9 @@
 package llm
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Fake is a pretend LLM for tests. It always replies with Reply.
 type Fake struct {
@@ -14,6 +17,11 @@ func (f Fake) Generate(_ context.Context, _ string) (string, error) {
 	return f.Reply, nil // nil = "no error"
 }
 
+// GenerateJSON decodes Reply as JSON — so tests set Reply to a JSON string.
+func (f Fake) GenerateJSON(_ context.Context, _ string, _ Schema, out any) error {
+	return json.Unmarshal([]byte(f.Reply), out)
+}
+
 // This line is a compile-time check: "Fake must fit the Client port".
-// If your method is wrong, `go build` fails here with a helpful message.
+// If a method is wrong, `go build` fails here with a helpful message.
 var _ Client = Fake{}

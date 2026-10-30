@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS applications (
     to_address   TEXT NOT NULL,
     subject      TEXT NOT NULL,
     applied_at   TIMESTAMPTZ NOT NULL,     -- TIMESTAMPTZ = timestamp with time zone (always use this)
-    status       TEXT NOT NULL,            -- follow_up_due | skipped  (later: drafted, followed_up, replied)
+    status       TEXT NOT NULL,            -- follow_up_due | skipped | drafted  (later: followed_up, replied)
     reason       TEXT NOT NULL,            -- why: "no reply yet", "they replied", ...
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     checked_at   TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -26,3 +26,11 @@ CREATE TABLE IF NOT EXISTS runs (
     checked      INT NOT NULL,             -- how many applications we looked at
     due          INT NOT NULL              -- how many need a follow-up
 );
+
+-- Step 5 additions. "ADD COLUMN IF NOT EXISTS" upgrades an existing table safely.
+-- (This is a hand-made "migration": a versioned change to the database shape.
+-- When we have more of these, a tool like goose will track them for us.)
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS company    TEXT;        -- "Pond", read by the LLM
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS role       TEXT;        -- "Software Engineer"
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS draft_id   TEXT;        -- Gmail draft we created
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS drafted_at TIMESTAMPTZ;

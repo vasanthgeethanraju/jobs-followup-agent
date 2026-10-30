@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/api/gmail/v1"
@@ -18,6 +19,14 @@ type Message struct {
 	Subject  string
 	Date     time.Time
 	LabelIDs []string
+	// The email's worldwide-unique ID header, e.g. <CAB...@mail.gmail.com>.
+	// Replies point at it (In-Reply-To) so mail apps show them as one thread.
+	MessageIDHeader string
+}
+
+// IsDraft: unsent drafts also live inside threads, with the "DRAFT" label.
+func (m Message) IsDraft() bool {
+	return slices.Contains(m.LabelIDs, "DRAFT")
 }
 
 // SentByMe: Gmail puts the built-in "SENT" label on everything you send.
@@ -90,7 +99,7 @@ func GetThread(ctx context.Context, svc *gmail.Service, id string) (Thread, erro
 	t, err := withRetry(ctx, func() (*gmail.Thread, error) {
 		return svc.Users.Threads.Get("me", id).
 			Format("metadata").
-			MetadataHeaders("From", "To", "Subject").
+			MetadataHeaders("From", "To", "Subject", "Message-ID").
 			Context(ctx).Do()
 	})
 	if err != nil {
@@ -113,6 +122,11 @@ func toMessage(m *gmail.Message) Message {
 		Date: time.UnixMilli(m.InternalDate),
 	}
 	for _, h := range m.Payload.Headers {
+		// Header names are case-insensitive ("Message-ID" vs "Message-Id").
+		if strings.EqualFold(h.Name, "Message-ID") {
+			msg.MessageIDHeader = h.Value
+			continue
+		}
 		switch h.Name {
 		case "From":
 			msg.From = h.Value

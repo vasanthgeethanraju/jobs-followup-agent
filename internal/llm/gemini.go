@@ -39,6 +39,15 @@ var _ Client = (*Gemini)(nil)
 
 type geminiRequest struct {
 	Contents []geminiContent `json:"contents"`
+	// omitempty = leave the field out of the JSON when it's nil/empty.
+	Config *geminiConfig `json:"generationConfig,omitempty"`
+}
+
+// geminiConfig turns on "structured output": the model MUST reply with JSON
+// matching ResponseSchema, instead of free text we'd have to guess-parse.
+type geminiConfig struct {
+	ResponseMimeType string         `json:"responseMimeType,omitempty"`
+	ResponseSchema   map[string]any `json:"responseSchema,omitempty"`
 }
 
 type geminiContent struct {
@@ -60,9 +69,39 @@ type geminiResponse struct {
 
 // Generate sends one prompt and returns the text answer.
 func (g *Gemini) Generate(ctx context.Context, prompt string) (string, error) {
+	return g.generate(ctx, prompt, nil)
+}
+
+// GenerateJSON asks Gemini for JSON matching schema and decodes it into out.
+func (g *Gemini) GenerateJSON(ctx context.Context, prompt string, schema Schema, out any) error {
+	// Translate our simple Schema into Gemini's format (a subset of OpenAPI).
+	props := map[string]any{}
+	var required []string
+	for name, desc := range schema {
+		props[name] = map[string]any{"type": "STRING", "description": desc}
+		required = append(required, name)
+	}
+	cfg := &geminiConfig{
+		ResponseMimeType: "application/json",
+		ResponseSchema:   map[string]any{"type": "OBJECT", "properties": props, "required": required},
+	}
+
+	text, err := g.generate(ctx, prompt, cfg)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal([]byte(text), out); err != nil {
+		return fmt.Errorf("gemini returned invalid JSON: %w (%.200s)", err, text)
+	}
+	return nil
+}
+
+// generate does the actual HTTP work for both methods above.
+func (g *Gemini) generate(ctx context.Context, prompt string, cfg *geminiConfig) (string, error) {
 	// 1. Build the JSON body: {"contents":[{"parts":[{"text":"..."}]}]}
 	body, err := json.Marshal(geminiRequest{
 		Contents: []geminiContent{{Parts: []geminiPart{{Text: prompt}}}},
+		Config:   cfg,
 	})
 	if err != nil {
 		return "", err

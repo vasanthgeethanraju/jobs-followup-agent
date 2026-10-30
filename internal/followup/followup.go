@@ -29,15 +29,23 @@ type Decision struct {
 	Subject   string    // subject of your original email
 	AppliedAt time.Time // when you sent it
 	DaysAgo   int
+	Original  mailbox.Message // your original email (needed to reply to it)
 }
 
 // Decide applies the rules to one thread. companyClosed = "this company has a
 // Rejected / Next Steps email in some OTHER conversation" (looked up by the caller).
 func Decide(t mailbox.Thread, opts Options, now time.Time, companyClosed bool) Decision {
+	// Sort the thread into: emails you sent, unsent drafts, and everyone else's.
 	var mine []mailbox.Message
+	var drafts, others int
 	for _, m := range t.Messages {
-		if m.SentByMe() {
+		switch {
+		case m.IsDraft():
+			drafts++
+		case m.SentByMe():
 			mine = append(mine, m)
+		default:
+			others++
 		}
 	}
 	if len(mine) == 0 {
@@ -51,6 +59,7 @@ func Decide(t mailbox.Thread, opts Options, now time.Time, companyClosed bool) D
 		Subject:   first.Subject,
 		AppliedAt: first.Date,
 		DaysAgo:   daysBetween(first.Date, now),
+		Original:  first,
 	}
 
 	// The rules, in order. The first one that matches decides.
@@ -61,10 +70,12 @@ func Decide(t mailbox.Thread, opts Options, now time.Time, companyClosed bool) D
 		d.Reason = "company has Rejected / Next Steps in another email"
 	case bounced(t):
 		d.Reason = "bounced (address didn't work)"
-	case len(mine) < len(t.Messages):
+	case others > 0:
 		d.Reason = "they replied"
 	case len(mine) > 1:
 		d.Reason = "already followed up"
+	case drafts > 0:
+		d.Reason = "draft waiting in Gmail"
 	case d.DaysAgo < opts.MinDays:
 		d.Reason = "too recent"
 	case d.DaysAgo > opts.MaxDays:

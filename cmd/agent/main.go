@@ -7,13 +7,18 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	// Our own packages. Import path = module name (from go.mod) + folder.
+	"github.com/joho/godotenv"
+
 	"github.com/vasanthgeethanraju/jobs-followup-agent/internal/followup"
+	"github.com/vasanthgeethanraju/jobs-followup-agent/internal/llm"
 	"github.com/vasanthgeethanraju/jobs-followup-agent/internal/mailbox"
 	"github.com/vasanthgeethanraju/jobs-followup-agent/internal/store"
+	"github.com/vasanthgeethanraju/jobs-followup-agent/internal/writer"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -28,13 +33,22 @@ const (
 	// Default database for local dev (matches compose.yaml).
 	// Override with the DATABASE_URL environment variable.
 	defaultDatabaseURL = "postgres://agent:agent@localhost:5433/jobs?sslmode=disable"
+
+	// The project mentioned in follow-ups. Override in .env.
+	defaultProjectURL  = "https://github.com/vasanthgeethanraju/jobs-followup-agent"
+	defaultProjectDesc = "an AI agent written in Go. It connects to Gmail through the Gmail API, uses an LLM (Google Gemini) to understand emails, and stores data in Postgres. Next I am adding RAG and an MCP server."
 )
 
 func main() {
 	// Command-line flags, e.g.:  go run ./cmd/agent -days 5
 	days := flag.Int("days", 7, "follow up on applications sent exactly this many days ago")
+	createDrafts := flag.Bool("draft", false, "create Gmail drafts (without it: just preview the emails here)")
 	flag.Parse()
 	// flag.Int returns a *pointer* (*int); "*days" reads the value it points to.
+
+	// Load settings from .env (API keys etc.). In the cloud there is no .env file;
+	// the variables are set directly, so a missing file is fine.
+	_ = godotenv.Load()
 
 	// A context carries deadlines/cancellation through every API call.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -104,6 +118,9 @@ func main() {
 		}
 
 		status := "skipped"
+		if d.Reason == "draft waiting in Gmail" {
+			status = "drafted"
+		}
 		if d.FollowUp {
 			status = "follow_up_due"
 			toFollowUp = append(toFollowUp, d)
@@ -132,6 +149,90 @@ func main() {
 
 	printTable(fmt.Sprintf("FOLLOW UP (%d)", len(toFollowUp)), toFollowUp)
 	printTable(fmt.Sprintf("SKIPPED (%d)", len(skipped)), skipped)
+
+	// 7. Write the follow-ups (and, with -draft, save them as Gmail drafts).
+	if len(toFollowUp) > 0 {
+		if err := writeFollowUps(ctx, svc, db, toFollowUp, *createDrafts); err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
+// writeFollowUps has the LLM write each email, prints it, and optionally
+// saves it as a Gmail draft. Drafts are never SENT — you review and send.
+func writeFollowUps(ctx context.Context, svc *gmail.Service, db *store.Store, due []followup.Decision, createDrafts bool) error {
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		return fmt.Errorf("GEMINI_API_KEY is not set (add it to .env)")
+	}
+	// Held as the INTERFACE type: swapping to Claude later only changes this line.
+	var client llm.Client = llm.NewGemini(apiKey, envOr("GEMINI_MODEL", "gemini-3.5-flash-lite"))
+
+	signature, err := mailbox.Signature(ctx, svc)
+	if err != nil {
+		return err
+	}
+
+	mode := "PREVIEW (nothing saved to Gmail; add -draft to create drafts)"
+	if createDrafts {
+		mode = "CREATING GMAIL DRAFTS (not sent: review them in Gmail → Drafts)"
+	}
+	fmt.Println("==========", mode, "==========")
+
+	for i, d := range due {
+		body, err := mailbox.GetBody(ctx, svc, d.Original.ID)
+		if err != nil {
+			return err
+		}
+
+		email, err := writer.Write(ctx, client, writer.Input{
+			To:           d.To,
+			Subject:      d.Subject,
+			OriginalBody: body,
+			Now:          time.Now(),
+			ProjectURL:   envOr("FOLLOWUP_PROJECT_URL", defaultProjectURL),
+			ProjectDesc:  envOr("FOLLOWUP_PROJECT_DESC", defaultProjectDesc),
+			// In .env, write a line break as \n — we turn it into a real one here.
+			SignOff: strings.ReplaceAll(envOr("FOLLOWUP_SIGNOFF", ""), `\n`, "\n"), // empty: Gmail signature has it
+		})
+		if err != nil {
+			// One bad email shouldn't stop the rest: report it and move on.
+			fmt.Printf("\n[%d/%d] %s: could not write email: %v\n", i+1, len(due), d.To, err)
+			continue
+		}
+
+		fmt.Printf("\n[%d/%d] To: %s | %s at %s\nSubject: Re: %s\n\n%s\n",
+			i+1, len(due), d.To, email.Role, email.Company, d.Subject, email.Text)
+
+		if !createDrafts {
+			continue
+		}
+		draftID, err := mailbox.CreateReplyDraft(ctx, svc, mailbox.Reply{
+			ThreadID:      d.ThreadID,
+			To:            d.To,
+			Subject:       d.Subject,
+			Text:          email.Text,
+			SignatureHTML: signature,
+			Original:      d.Original,
+			OriginalBody:  body,
+		})
+		if err != nil {
+			return err
+		}
+		if err := db.MarkDrafted(ctx, d.ThreadID, draftID, email.Company, email.Role); err != nil {
+			return err
+		}
+		fmt.Println("  → draft saved ✓")
+	}
+	return nil
+}
+
+// envOr reads an environment variable, with a fallback if it's not set.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // searchWindow returns [from, to): local midnights bounding the days whose

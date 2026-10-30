@@ -40,6 +40,8 @@ func TestDecide(t *testing.T) {
 		{"closed elsewhere", []mailbox.Message{sent(6)}, true, false, "company has Rejected / Next Steps in another email"},
 		{"already followed up", []mailbox.Message{sent(10), sent(3)}, false, false, "already followed up"},
 		{"bounced", []mailbox.Message{sent(6), reply("Mail Delivery Subsystem <mailer-daemon@googlemail.com>", 6)}, false, false, "bounced (address didn't work)"},
+		// Our own draft must NOT count as "they replied" (the bug this case guards against).
+		{"draft waiting", []mailbox.Message{sent(6), {From: "me@gmail.com", Date: daysAgo(0), LabelIDs: []string{"DRAFT"}}}, false, false, "draft waiting in Gmail"},
 	}
 
 	for _, tc := range tests {

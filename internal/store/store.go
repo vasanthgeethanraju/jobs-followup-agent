@@ -92,3 +92,13 @@ func (s *Store) RecordRun(ctx context.Context, startedAt time.Time, checked, due
 		startedAt, checked, due)
 	return err
 }
+
+// MarkDrafted records that a follow-up draft now exists for this application.
+func (s *Store) MarkDrafted(ctx context.Context, threadID, draftID, company, role string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE applications
+		SET status = 'drafted', draft_id = $2, company = $3, role = $4, drafted_at = now()
+		WHERE thread_id = $1`,
+		threadID, draftID, company, role)
+	return err
+}
